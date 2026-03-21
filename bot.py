@@ -1,178 +1,69 @@
 import os
-from datetime import date
-from typing import Any, Dict, List, Optional
-
-import redis
+import json
 import requests
+from datetime import date
 
+STATE_FILE = "state.json"
 
 WB_URL = "https://common-api.wildberries.ru/api/communications/v2/news"
-LAST_ID_KEY = "wb_news:last_id"
-REQUEST_TIMEOUT = 30
-MAX_NEWS_PER_RUN = 10
+
+WB_TOKEN = os.getenv("WB_TOKEN")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 
-def require_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise ValueError(f"{name} not set")
-    return value
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {"last_id": None}
+    with open(STATE_FILE, "r") as f:
+        return json.load(f)
 
 
-WB_TOKEN = require_env("WB_TOKEN")
-TG_BOT_TOKEN = require_env("TG_BOT_TOKEN")
-TG_CHAT_ID = require_env("TG_CHAT_ID")
-REDIS_URL = require_env("REDIS_URL")
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
 
 
-def get_redis_client() -> redis.Redis:
-    return redis.from_url(REDIS_URL, decode_responses=True)
-
-
-def get_last_id(rdb: redis.Redis) -> Optional[int]:
-    value = rdb.get(LAST_ID_KEY)
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def set_last_id(rdb: redis.Redis, news_id: int) -> None:
-    rdb.set(LAST_ID_KEY, news_id)
-
-
-def get_wb_news_by_date(from_date: str) -> List[Dict[str, Any]]:
+def get_news(params):
     headers = {"Authorization": WB_TOKEN}
-    params = {"from": from_date}
-
-    response = requests.get(WB_URL, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-
-    payload = response.json()
-    if payload.get("error"):
-        raise RuntimeError(f"WB API error: {payload}")
-
-    return payload.get("data", [])
+    r = requests.get(WB_URL, headers=headers, params=params)
+    r.raise_for_status()
+    return r.json().get("data", [])
 
 
-def get_wb_news_by_from_id(from_id: int) -> List[Dict[str, Any]]:
-    headers = {"Authorization": WB_TOKEN}
-    params = {"fromID": from_id}
-
-    response = requests.get(WB_URL, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-
-    payload = response.json()
-    if payload.get("error"):
-        raise RuntimeError(f"WB API error: {payload}")
-
-    return payload.get("data", [])
-
-
-def send_telegram_message(text: str) -> None:
+def send_tg(text):
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {
+    requests.post(url, json={
         "chat_id": TG_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-
-    response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
+        "text": text[:4000],
+    })
 
 
-def escape_html(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+def main():
+    state = load_state()
+    last_id = state.get("last_id")
 
+    if last_id:
+        news = get_news({"fromID": last_id})
+    else:
+        today = date.today().isoformat()
+        news = get_news({"from": today})
 
-def format_news(item: Dict[str, Any]) -> str:
-    news_id = item.get("id", "")
-    header = escape_html(str(item.get("header", "Без заголовка")))
-    content = escape_html(str(item.get("content", "")))
-    news_date = escape_html(str(item.get("date", "")))
-
-    if len(content) > 3000:
-        content = content[:3000] + "..."
-
-    return (
-        f"<b>{header}</b>\n\n"
-        f"{content}\n\n"
-        f"📅 {news_date}\n"
-        f"🆔 {news_id}"
-    )
-
-
-def bootstrap_last_id(rdb: redis.Redis) -> None:
-    today = date.today().isoformat()
-    items = get_wb_news_by_date(today)
-
-    if not items:
-        print("Bootstrap: новостей за сегодня нет, last_id не установлен")
+    if not news:
+        print("Нет новостей")
         return
 
-    max_id = max(int(item.get("id", 0)) for item in items)
-    set_last_id(rdb, max_id)
-    print(f"Bootstrap complete. last_id={max_id}")
+    new_items = [n for n in news if not last_id or n["id"] > last_id]
+    new_items.sort(key=lambda x: x["id"])
 
+    for item in new_items:
+        text = f"{item['header']}\n\n{item['content'][:3000]}"
+        send_tg(text)
+        print("Отправлено:", item["id"])
+        last_id = item["id"]
 
-def get_new_items(rdb: redis.Redis) -> List[Dict[str, Any]]:
-    last_id = get_last_id(rdb)
-
-    if last_id is None:
-        bootstrap_last_id(rdb)
-        return []
-
-    items = get_wb_news_by_from_id(last_id)
-    if not items:
-        return []
-
-    normalized: List[Dict[str, Any]] = []
-    for item in items:
-        try:
-            item_id = int(item.get("id", 0))
-        except (TypeError, ValueError):
-            continue
-
-        if item_id > last_id:
-            normalized.append(item)
-
-    normalized.sort(key=lambda x: int(x.get("id", 0)))
-    return normalized
-
-
-def main() -> None:
-    print("WB news check started")
-    rdb = get_redis_client()
-
-    items = get_new_items(rdb)
-    if not items:
-        print("Новых новостей нет")
-        return
-
-    items_to_send = items[:MAX_NEWS_PER_RUN]
-    print(f"Найдено новых новостей: {len(items)}. Отправим: {len(items_to_send)}")
-
-    max_sent_id = get_last_id(rdb) or 0
-
-    for item in items_to_send:
-        item_id = int(item["id"])
-        message = format_news(item)
-        send_telegram_message(message)
-        print(f"Отправлена новость ID={item_id}")
-
-        if item_id > max_sent_id:
-            max_sent_id = item_id
-
-    set_last_id(rdb, max_sent_id)
-    print(f"Updated last_id={max_sent_id}")
-    print("Done")
+    state["last_id"] = last_id
+    save_state(state)
 
 
 if __name__ == "__main__":
