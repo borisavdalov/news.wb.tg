@@ -1,4 +1,2 @@
-__pycache__/
-*.pyc
-state.json
 .env
+state.json
