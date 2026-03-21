@@ -6,11 +6,6 @@ import redis
 import requests
 
 
-WB_TOKEN = os.getenv("WB_TOKEN")
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID")
-REDIS_URL = os.getenv("REDIS_URL")
-
 WB_URL = "https://common-api.wildberries.ru/api/communications/v2/news"
 LAST_ID_KEY = "wb_news:last_id"
 REQUEST_TIMEOUT = 30
