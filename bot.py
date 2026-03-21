@@ -1,7 +1,7 @@
 import os
 import json
 import html
-from datetime import date
+from datetime import datetime, timedelta
 
 import requests
 
@@ -61,13 +61,12 @@ def build_message(item):
     if len(content) > 2500:
         content = content[:2500] + "..."
 
-    message = (
+    return (
         f"🆕 <b>{header}</b>\n\n"
         f"📅 {news_date}\n"
         f"🆔 {news_id}\n\n"
         f"{content}"
     )
-    return message
 
 
 def main():
@@ -83,9 +82,11 @@ def main():
 
     if last_id:
         news = get_news({"fromID": last_id})
+        print(f"Проверка новых новостей после ID {last_id}")
     else:
-        today = date.today().isoformat()
-        news = get_news({"from": today})
+        date_from = (datetime.utcnow() - timedelta(days=7)).date().isoformat()
+        news = get_news({"from": date_from})
+        print(f"Первый запуск, берём новости с даты {date_from}")
 
     if not news:
         print("Нет новостей")
