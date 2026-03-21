@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: "*/10 * * * *"
 
+permissions:
+  contents: write
+
 concurrency:
   group: wb-news-bot
   cancel-in-progress: false
@@ -17,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,10 +31,23 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Ensure state file exists
+        run: |
+          if [ ! -f state.json ]; then
+            echo '{"last_id": null}' > state.json
+          fi
+
       - name: Run bot
         env:
           WB_TOKEN: ${{ secrets.WB_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          REDIS_URL: ${{ secrets.REDIS_URL }}
         run: python bot.py
+
+      - name: Commit state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || git commit -m "Update bot state"
+          git push
